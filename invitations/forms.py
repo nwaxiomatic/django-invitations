@@ -1,81 +1,83 @@
 from django import forms
 from django.utils.translation import ugettext_lazy as _
-from allauth.account.adapter import get_adapter
+from django.contrib.auth import get_user_model
+
 from .models import Invitation
+from .adapters import get_invitations_adapter
+from .exceptions import AlreadyInvited, AlreadyAccepted, UserRegisteredEmail
 
 
-class InviteForm(forms.Form):
+class CleanEmailMixin(object):
 
-    email = forms.EmailField(label=_("E-mail"),
-                             required=True,
-                             widget=forms.TextInput(attrs={"type": "email",
-                                                           "size": "30"}))
+    def validate_invitation(self, email):
+        if Invitation.objects.all_valid().filter(
+                email__iexact=email, accepted=False):
+            raise AlreadyInvited
+        elif Invitation.objects.filter(
+                email__iexact=email, accepted=True):
+            raise AlreadyAccepted
+        elif get_user_model().objects.filter(email__iexact=email):
+            raise UserRegisteredEmail
+        else:
+            return True
 
     def clean_email(self):
-        value = self.cleaned_data["email"]
-        value = get_adapter().clean_email(value)
+        email = self.cleaned_data["email"]
+        email = get_invitations_adapter().clean_email(email)
+
         errors = {
             "already_invited": _("This e-mail address has already been"
                                  " invited."),
+            "already_accepted": _("This e-mail address has already"
+                                  " accepted an invite."),
+            "email_in_use": _("An active user is using this e-mail address"),
         }
-        if Invitation.objects.filter(email__iexact=value,
-                                     accepted=False):
+        try:
+            self.validate_invitation(email)
+        except(AlreadyInvited):
             raise forms.ValidationError(errors["already_invited"])
+        except(AlreadyAccepted):
+            raise forms.ValidationError(errors["already_accepted"])
+        except(UserRegisteredEmail):
+            raise forms.ValidationError(errors["email_in_use"])
+        return email
 
-        return value
+
+class InviteForm(forms.Form, CleanEmailMixin):
+
+    email = forms.EmailField(
+        label=_("E-mail"),
+        required=True,
+        widget=forms.TextInput(attrs={"type": "email", "size": "30"}))
 
     def save(self, email):
         return Invitation.create(email=email)
 
-class InviteModelForm(forms.ModelForm):
-    model = Invitation
-    email = forms.EmailField(label=_("E-mail"),
-                             required=True,
-                             widget=forms.TextInput(attrs={"type": "email",
-                                                           "size": "30"}))
+
+class InvitationAdminAddForm(forms.ModelForm, CleanEmailMixin):
+    email = forms.EmailField(
+        label=_("E-mail"),
+        required=True,
+        widget=forms.TextInput(attrs={"type": "email", "size": "30"}))
+
+    def save(self, *args, **kwargs):
+        cleaned_data = super(InvitationAdminAddForm, self).clean()
+        email = cleaned_data.get("email")
+        params = {'email': email}
+        if cleaned_data.get("inviter"):
+            params['inviter'] = cleaned_data.get("inviter")
+        instance = Invitation.create(**params)
+        instance.send_invitation(self.request)
+        super(InvitationAdminAddForm, self).save(*args, **kwargs)
+        return instance
+
+    class Meta:
+        model = Invitation
+        fields = ("email", "inviter")
+
+
+class InvitationAdminChangeForm(forms.ModelForm):
 
     class Meta:
         model = Invitation
         fields = '__all__'
-
-    def clean_email(self):
-        value = self.cleaned_data["email"]
-        value = get_adapter().clean_email(value)
-        errors = {
-            "this_account": _("This e-mail address is already associated"
-                              " with this account."),
-            "different_account": _("This e-mail address is already associated"
-                                   " with another account."),
-        }
-        emails = EmailAddress.objects.filter(email__iexact=value)
-        if app_settings.UNIQUE_EMAIL:
-            if emails.exists():
-                raise forms.ValidationError(errors["different_account"])
-        errors = {
-            "already_invited": _("This e-mail address has already been"
-                                 " invited."),
-        }
-        if Invitation.objects.filter(email__iexact=value,
-                                     accepted=False):
-            raise forms.ValidationError(errors["already_invited"])
-        return value
-
-    def form_valid(self, form):
-        email = form.cleaned_data["email"]
-
-        try:
-            invite = form.save(email)
-            invite.send_invitation(self.request)
-        except Exception as e:
-            return self.form_invalid(form)
-        self.save()
-        return super(InviteModelForm, self).form_valid(form)    
-
-    def save(self, *args, **kwargs):
-        cleaned_data = super(InviteModelForm, self).clean()
-        email = cleaned_data.get("email")
-        invite = Invitation.create(email=email)
-        invite.send_invitation(self.request)
-        self.instance = invite
-        super(InviteModelForm, self).save(*args, **kwargs)
-        return invite

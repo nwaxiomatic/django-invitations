@@ -1,4 +1,9 @@
 .DS_Store
 *.pyc
-dist
+.tox/
+dist/
+.coverage/
 django_invitations.egg-info/
+.gitchangelog.rc
+.python-version
+.coverage
